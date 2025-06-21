@@ -15,6 +15,7 @@ import {
 } from "firebase/firestore";
 import ProfilePictureUpload from "./ProfilePictureUpload";
 import PDFUpload from "./PDFUpload";
+import OngoingPDFUpload from "./OngoingPDFUpload";
 // import { s3 } from '../awsConfig';
 import { s3 } from "../cloudflareConfig";
 import Select from "react-select";
@@ -65,22 +66,31 @@ const Profile = () => {
   const [newAbout, setNewAbout] = useState("");
   const [loading, setLoading] = useState(true);
   const [pdfs, setPdfs] = useState([]);
+  const [ongoingPdfs, setOngoingPdfs] = useState([]);
   const [contributionsCount, setContributionsCount] = useState(
     profileUser ? profileUser.contributions : 0
   );
   const [currentPdfIndex, setCurrentPdfIndex] = useState(0);
   const [isHovering, setIsHovering] = useState(false);
+  const [isHoveringCertification, setIsHoveringCertification] = useState(false);
   const [selectedInterests, setSelectedInterests] = useState([]);
   const [hasPendingRequest, setHasPendingRequest] = useState(false);
 
   const [showRemoveModal, setShowRemoveModal] = useState(false);
   const [pdfToRemove, setPdfToRemove] = useState(null);
 
+  const [showOngoingRemoveModal, setShowOngoingRemoveModal] = useState(false);
+  const [ongoingPdfToRemove, setOngoingPdfToRemove] = useState(null);
+
   const [editedTitle, setEditedTitle] = useState("");
   const [editedDescription, setEditedDescription] = useState("");
   const [requestSent, setRequestSent] = useState(false);
 
+  const [editedOngoingTitle, setEditedOngoingTitle] = useState("");
+  const [editedOngoingDescription, setEditedOngoingDescription] = useState("");
+
   const [editedTags, setEditedTags] = useState([]);
+  const [editedOngoingTags, setEditedOngoingTags] = useState([]);
 
   const [showFollowersModal, setShowFollowersModal] = useState(false);
   const [followersList, setFollowersList] = useState([]);
@@ -330,6 +340,21 @@ const Profile = () => {
     setShowRemoveModal(true);
   };
 
+  const handleEditOngoing = (pdf) => {
+    if (!currentUser || !profileUser || currentUser.uid !== profileUser.uid) {
+      return;
+    }
+    setOngoingPdfToRemove(pdf);
+    setEditedOngoingTitle(pdf.title);
+    setEditedOngoingDescription(pdf.description);
+    setEditedOngoingTags(
+      pdf.topics
+        ? pdf.topics.map((topic) => ({ value: topic, label: topic }))
+        : []
+    );
+    setShowOngoingRemoveModal(true);
+  };
+
   const saveChanges = async () => {
     if (!pdfToRemove) return;
     try {
@@ -353,6 +378,32 @@ const Profile = () => {
     } finally {
       setShowRemoveModal(false);
       setPdfToRemove(null);
+    }
+  };
+
+  const saveChangesOngoing = async () => {
+    if (!ongoingPdfToRemove) return;
+    try {
+      const userDocRef = doc(db, "users", currentUser.uid);
+      const updatedOngoingPdfs = ongoingPdfs.map((pdf) =>
+        pdf.url === ongoingPdfToRemove.url
+          ? {
+              ...pdf,
+              title: editedOngoingTitle,
+              description: editedOngoingDescription,
+              topics: editedOngoingTags.map((tag) => tag.value),
+            }
+          : pdf
+      );
+      await updateDoc(userDocRef, { ongoingPdfs: updatedOngoingPdfs });
+      setOngoingPdfs(updatedOngoingPdfs);
+      console.log("Successfully updated ongoing PDF in Firestore");
+    } catch (error) {
+      console.error("Error updating ongoing PDF:", error);
+      alert("Failed to update ongoing PDF. Please try again.");
+    } finally {
+      setShowOngoingRemoveModal(false);
+      setOngoingPdfToRemove(null);
     }
   };
 
@@ -405,6 +456,52 @@ const Profile = () => {
     }
   };
 
+  const confirmRemoveOngoing = async () => {
+    if (!ongoingPdfToRemove) return;
+
+    try {
+      const response = await fetch("https://resdex.onrender.com/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: currentUser.uid,
+          objectKey: ongoingPdfToRemove.objectKey,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!result.success) throw new Error(result.message);
+
+      const updatedOngoingPdfs = ongoingPdfs.filter(
+        (pdf) => pdf.objectKey !== ongoingPdfToRemove.objectKey
+      );
+      await updateDoc(doc(db, "users", currentUser.uid), { ongoingPdfs: updatedOngoingPdfs });
+
+      const searchIndexDocRef = doc(db, "searchIndex", "papersList");
+      const searchIndexDoc = await getDoc(searchIndexDocRef);
+
+      if (searchIndexDoc.exists()) {
+        const papersList = searchIndexDoc.data().papers || [];
+        const updatedPapersList = papersList.filter(
+          (paper) => paper.objectKey !== ongoingPdfToRemove.objectKey
+        );
+
+        await updateDoc(searchIndexDocRef, { papers: updatedPapersList });
+      }
+
+      setOngoingPdfs(updatedOngoingPdfs);
+
+      console.log("Successfully removed ongoing PDF from both R2 and Firestore");
+    } catch (error) {
+      console.error("Error removing ongoing PDF:", error);
+      alert("Failed to remove ongoing PDF. Please try again.");
+    } finally {
+      setShowOngoingRemoveModal(false);
+      setOngoingPdfToRemove(null);
+    }
+  };
+
   const fetchPDFs = useCallback(async (userId) => {
     try {
       const userDocRef = doc(db, "users", userId);
@@ -419,6 +516,23 @@ const Profile = () => {
     } catch (error) {
       console.error("Error fetching PDFs:", error);
       setPdfs([]);
+    }
+  }, []);
+
+  const fetchOngoingPDFs = useCallback(async (userId) => {
+    try {
+      const userDocRef = doc(db, "users", userId);
+      const userDoc = await getDoc(userDocRef);
+      const userData = userDoc.data();
+
+      if (userData && userData.ongoingPdfs && userData.ongoingPdfs.length > 0) {
+        setOngoingPdfs(userData.ongoingPdfs);
+      } else {
+        setOngoingPdfs([]);
+      }
+    } catch (error) {
+      console.error("Error fetching ongoing PDFs:", error);
+      setOngoingPdfs([]);
     }
   }, []);
 
@@ -437,6 +551,7 @@ const Profile = () => {
       }
       if (cachedProfile && cachedProfile.uid) {
         await fetchPDFs(cachedProfile.uid);
+        await fetchOngoingPDFs(cachedProfile.uid);
       }
 
       const usernamesRef = collection(db, "usernames");
@@ -482,6 +597,7 @@ const Profile = () => {
         );
         saveProfileToLocalStorage(username, userData);
         await fetchPDFs(userData.uid);
+        await fetchOngoingPDFs(userData.uid);
       }
     } catch (error) {
       console.error("Error fetching profile data: ", error);
@@ -489,7 +605,7 @@ const Profile = () => {
     } finally {
       setLoading(false);
     }
-  }, [username, fetchPDFs]);
+  }, [username, fetchPDFs, fetchOngoingPDFs]);
 
   useEffect(() => {
     fetchProfileData();
@@ -498,8 +614,9 @@ const Profile = () => {
   useEffect(() => {
     if (profileUser && profileUser.uid) {
       fetchPDFs(profileUser.uid);
+      fetchOngoingPDFs(profileUser.uid);
     }
-  }, [profileUser, fetchPDFs]);
+  }, [profileUser, fetchPDFs, fetchOngoingPDFs]);
 
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged((user) => {
@@ -1047,7 +1164,7 @@ const Profile = () => {
                     className="row justify-content-center align-items-center"
                   >
                     {pdfs.length > 0 ? (
-                      <Carousel>
+                      <Carousel style={{ maxHeight: "500px", overflow: "hidden" }}>
                         {pdfs.map((pdf, index) => (
                           <Carousel.Item key={index}>
                             <div
@@ -1151,6 +1268,186 @@ const Profile = () => {
                         No Documents Uploaded
                       </div>
                     )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Certifications Section */}
+              <div className="mt-5">
+                <div
+                  style={{ borderRadius: "5px", margin: "0px" }}
+                  className="row d-flex justify-content-center"
+                >
+                  <div className="col-md-12 box">
+                    <div className="row" style={{ marginTop: "-10px" }}>
+                      <div className="col-md d-flex align-items-center">
+                        <h4 className="primary">Certifications</h4>
+                      </div>
+
+                      <div
+                        className="col-md"
+                        style={{ position: "relative", textAlign: "right" }}
+                      >
+                        {isOwnProfile && (
+                          <OngoingPDFUpload
+                            user={currentUser}
+                            onUploadComplete={() => fetchOngoingPDFs(currentUser.uid)}
+                          />
+                        )}
+                      </div>
+                    </div>
+                    <div
+                      style={{
+                        borderRadius: "5px",
+                        padding: "20px",
+                        paddingBottom: "50px",
+                        border: "1px solid white",
+                        marginBottom: "10px",
+                      }}
+                      className="row justify-content-center align-items-center"
+                    >
+                      {ongoingPdfs.length > 0 ? (
+                        <>
+                          <div style={{ position: "relative", height: "300px", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            {ongoingPdfs.map((pdf, index) => {
+                              const isCenter = index === currentPdfIndex;
+                              const isLeft = index === (currentPdfIndex - 1 + ongoingPdfs.length) % ongoingPdfs.length;
+                              const isRight = index === (currentPdfIndex + 1) % ongoingPdfs.length;
+                              
+                              if (!isCenter && !isLeft && !isRight) return null;
+                              
+                              return (
+                                <div
+                                  key={index}
+                                  style={{
+                                    position: "absolute",
+                                    width: isCenter ? "50%" : "20%",
+                                    height: "250px",
+                                    transform: isCenter 
+                                      ? "translateX(0) scale(1)" 
+                                      : isLeft 
+                                      ? "translateX(-120%) scale(0.8)" 
+                                      : "translateX(120%) scale(0.8)",
+                                    opacity: isCenter ? 1 : 0.6,
+                                    transition: "all 0.3s ease",
+                                    cursor: "pointer",
+                                    zIndex: isCenter ? 3 : 2
+                                  }}
+                                  onClick={() => !isCenter && setCurrentPdfIndex(index)}
+                                >
+                                  <div style={{
+                                    width: "100%",
+                                    height: "100%",
+                                    backgroundColor: "#1a1a1a",
+                                    borderRadius: "10px",
+                                    border: "1px solid white",
+                                    padding: "10px",
+                                    display: "flex",
+                                    flexDirection: "column"
+                                  }}>
+                                    <div style={{ flex: 1, marginBottom: "8px" }}>
+                                      <iframe
+                                        title="pdf"
+                                        src={`https://docs.google.com/viewer?url=${encodeURIComponent(pdf.url)}&embedded=true`}
+                                        style={{
+                                          width: "100%",
+                                          height: "100%",
+                                          border: "none",
+                                          borderRadius: "5px",
+                                          pointerEvents: "none",
+                                        }}
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                            
+                            {/* Navigation arrows */}
+                            {ongoingPdfs.length > 1 && (
+                              <>
+                                <button
+                                  style={{
+                                    position: "absolute",
+                                    left: "10px",
+                                    top: "50%",
+                                    transform: "translateY(-50%)",
+                                    backgroundColor: "rgba(0,0,0,0.7)",
+                                    border: "none",
+                                    borderRadius: "50%",
+                                    width: "40px",
+                                    height: "40px",
+                                    color: "white",
+                                    fontSize: "20px",
+                                    cursor: "pointer",
+                                    zIndex: 4
+                                  }}
+                                  onClick={() => setCurrentPdfIndex((currentPdfIndex - 1 + ongoingPdfs.length) % ongoingPdfs.length)}
+                                >
+                                  ‹
+                                </button>
+                                <button
+                                  style={{
+                                    position: "absolute",
+                                    right: "10px",
+                                    top: "50%",
+                                    transform: "translateY(-50%)",
+                                    backgroundColor: "rgba(0,0,0,0.7)",
+                                    border: "none",
+                                    borderRadius: "50%",
+                                    width: "40px",
+                                    height: "40px",
+                                    color: "white",
+                                    fontSize: "20px",
+                                    cursor: "pointer",
+                                    zIndex: 4
+                                  }}
+                                  onClick={() => setCurrentPdfIndex((currentPdfIndex + 1) % ongoingPdfs.length)}
+                                >
+                                  ›
+                                </button>
+                              </>
+                            )}
+                          </div>
+                          
+                          {/* Title below the carousel */}
+                          <div style={{ textAlign: "left", marginTop: "5px", paddingLeft: "25%" }}>
+                            <h5 className="primary" style={{ marginBottom: "10px" }}>
+                              {ongoingPdfs[currentPdfIndex].title}
+                            </h5>
+                          </div>
+                          
+                          {/* Buttons below the carousel */}
+                          <div style={{ textAlign: "center", marginTop: "10px" }}>
+                            <div style={{ display: "flex", justifyContent: "center", gap: "15px" }}>
+                              <button
+                                className="custom"
+                                style={{ fontSize: "14px", padding: "8px 16px" }}
+                                onClick={() => window.open(ongoingPdfs[currentPdfIndex].url, "_blank")}
+                              >
+                                View ⇗
+                              </button>
+                              {isOwnProfile && (
+                                <button
+                                  className="custom"
+                                  style={{ fontSize: "14px", padding: "8px 16px" }}
+                                  onClick={() => handleEditOngoing(ongoingPdfs[currentPdfIndex])}
+                                >
+                                  Edit Certification
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </>
+                      ) : (
+                        <div
+                          className=" text-center primary"
+                          style={{ marginTop: "40px" }}
+                        >
+                          No Certifications Uploaded
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1508,6 +1805,79 @@ const Profile = () => {
         Cancel
       </Button> */}
             <Button className="custom-view" onClick={saveChanges}>
+              Save Changes
+            </Button>
+          </div>
+        </Modal.Footer>
+      </Modal>
+
+      {/* Certifications Edit Modal */}
+      <Modal
+        show={showOngoingRemoveModal}
+        className="box"
+        onHide={() => setShowOngoingRemoveModal(false)}
+      >
+        <Modal.Header
+          style={{ background: "#e5e3df", borderBottom: "1px solid white" }}
+          closeButton
+        >
+          <Modal.Title style={{ color: "black" }}>Edit Certification</Modal.Title>
+        </Modal.Header>
+        <Modal.Body
+          style={{ background: "#e5e3df", borderBottom: "1px solid white" }}
+        >
+          <Form
+            style={{ background: "#e5e3df", borderBottom: "1px solid white" }}
+          >
+            <Form.Group className="mb-3" controlId="formOngoingDocumentTitle">
+              <Form.Label className="primary">Title</Form.Label>
+              <Form.Control
+                type="text"
+                placeholder="Enter new title"
+                value={editedOngoingTitle}
+                onChange={(e) => setEditedOngoingTitle(e.target.value)}
+              />
+            </Form.Group>
+            <Form.Group className="mb-3" controlId="formOngoingDocumentDescription">
+              <Form.Label className="primary">Description</Form.Label>
+              <Form.Control
+                as="textarea"
+                rows={3}
+                maxLength={150}
+                placeholder="Enter new description"
+                value={editedOngoingDescription}
+                onChange={(e) => setEditedOngoingDescription(e.target.value)}
+              />
+            </Form.Group>
+            <Form.Group className="mb-3" controlId="formOngoingDocumentTags">
+              <Form.Label className="primary">Related Topic</Form.Label>
+              <Select
+                isMulti
+                name="ongoingTags"
+                options={interestOptions}
+                className="basic-multi-select"
+                classNamePrefix="select"
+                value={editedOngoingTags}
+                onChange={(selected) => {
+                  if (selected.length <= 3) {
+                    setEditedOngoingTags(selected);
+                  }
+                }}
+                isOptionDisabled={() => editedOngoingTags.length >= 3}
+                placeholder="Select a topic!"
+                styles={customStyles}
+              />
+            </Form.Group>
+          </Form>
+        </Modal.Body>
+        <Modal.Footer
+          style={{ background: "#e5e3df", borderBottom: "1px solid white" }}
+        >
+          <Button className="custom-view" onClick={confirmRemoveOngoing}>
+            Remove
+          </Button>
+          <div className="ms-auto">
+            <Button className="custom-view" onClick={saveChangesOngoing}>
               Save Changes
             </Button>
           </div>
